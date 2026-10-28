@@ -1,3 +1,4 @@
+import SignOutButton from "@/components/sign-out-button";
 
 export default function UserDashboard() {
   return (
@@ -10,6 +11,8 @@ export default function UserDashboard() {
           <h1 className="mt-2 text-3xl font-bold text-slate-900">
             My Dashboard
           </h1>
+          <SignOutButton />
+
           <p className="mt-2 text-slate-600">
             View your customer registration links in one place.
           </p>

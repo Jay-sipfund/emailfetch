@@ -1,20 +1,21 @@
 
-export const instant = false;
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { getAuth } from "@/lib/auth";
 import clientPromise from "@/lib/mongodb";
 import { ObjectId } from "mongodb";
+import SignOutButton from "@/components/sign-out-button";
+export const instant = false;
 
 export default async function AdminDashboard() {
-     await headers();
+    await headers();
     const auth = await getAuth();
 
     const session = await auth.api.getSession({
         headers: await headers(),
     });
 
-    
+
 
     if (!session) {
         redirect("/login");
@@ -39,7 +40,7 @@ export default async function AdminDashboard() {
     if (user?.role !== "admin") {
         redirect("/dashboard");
     }
-
+ 
     return (
         <main className="min-h-screen bg-slate-50 p-6 md:p-10">
             <div className="mx-auto max-w-6xl">
@@ -47,6 +48,7 @@ export default async function AdminDashboard() {
                     <p className="text-sm font-semibold text-blue-700">
                         EMAILFETCH · ADMIN
                     </p>
+                  <SignOutButton />
                     <h1 className="mt-2 text-3xl font-bold text-slate-900">
                         Admin Dashboard
                     </h1>

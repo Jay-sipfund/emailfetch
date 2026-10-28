@@ -162,7 +162,23 @@ export async function GET() {
                         }
                     );
                 }
-
+if (
+    matchedUser &&
+    registrationLink &&
+    /^https?:\/\/\S+\.\S+/.test(registrationLink)
+) {
+    await db.collection("user").updateOne(
+        { _id: matchedUser._id },
+        {
+            $set: {
+                nseRegistrationLink: registrationLink,
+                nseRegistrationStatus: "pending",
+                nseRegistrationEmailId: message.id,
+                nseRegistrationLinkUpdatedAt: new Date(),
+            },
+        }
+    );
+}
                 const urls = extractUrls(body);
 
                 return {
