@@ -41,7 +41,8 @@ function decodeHtml(text: string): string {
 
 export async function processNseEmails() {
   const client = await clientPromise;
-  const db = client.db();
+  const db = client.db("emailfetch");
+  const users = db.collection("user");
 
   const connection = await db.collection("gmailConnections").findOne({
     purpose: "nse-registration-mailbox",
@@ -79,36 +80,32 @@ export async function processNseEmails() {
   for (const message of result.data.messages ?? []) {
     if (!message.id) continue;
 
-    const alreadyProcessed = await db.collection("user").findOne({
-      nseRegistrationEmailId: message.id,
-    });
-
-    if (alreadyProcessed) {
-      skipped++;
-      continue;
-    }
-
     const detail = await gmail.users.messages.get({
       userId: "me",
       id: message.id,
       format: "full",
     });
 
+    // Gmail internalDate is the message's received timestamp in milliseconds.
+    const receivedAt = new Date(Number(detail.data.internalDate));
+
+    if (
+      !detail.data.internalDate ||
+      Number.isNaN(receivedAt.getTime())
+    ) {
+      skipped++;
+      continue;
+    }
+
     const body = decodeHtml(
       getEmailBody(detail.data.payload ?? {})
     );
 
-    console.log("[NSE DEBUG] Email ID:", message.id);
-    console.log("[NSE DEBUG] Body preview:", body.slice(0, 1500));
-
-    // Extract UCC with or without a period after "Code".
     const uccMatch = body.match(
       /Unique Client Code\.?\s*\(UCC\)\s*:\s*([^\r\n<]+)/i
     );
-
     const ucc = uccMatch?.[1]?.trim() ?? null;
 
-    // Extract a URL with or without its protocol.
     const linkMatch = body.match(
       /Authorisation\s+Link\s*:\s*((?:https?:\/\/)?[^\s"'<>]+)/i
     );
@@ -118,12 +115,10 @@ export async function processNseEmails() {
     if (registrationLink) {
       registrationLink = registrationLink.replace(/[),.;]+$/, "");
 
-      // Add HTTPS when no protocol was provided.
       if (!/^https?:\/\//i.test(registrationLink)) {
         registrationLink = `https://${registrationLink}`;
       }
 
-      // Validate the normalized URL.
       try {
         const parsedUrl = new URL(registrationLink);
 
@@ -138,33 +133,56 @@ export async function processNseEmails() {
       }
     }
 
-    console.log("[NSE DEBUG] Extracted UCC:", ucc);
-    console.log("[NSE DEBUG] Extracted link:", registrationLink);
-
     processed++;
 
     if (!ucc || !registrationLink) continue;
 
-    const matchedUser = await db.collection("user").findOne({ ucc });
+    const matchedUser = await users.findOne({ ucc });
 
     if (!matchedUser) {
-      console.log("[NSE DEBUG] No user found for UCC:", ucc);
+      console.log("[NSE] No user found for UCC:", ucc);
       continue;
     }
 
-    await db.collection("user").updateOne(
-      { _id: matchedUser._id },
+    // Skip this email if it is already the user's saved email.
+    if (matchedUser.nseRegistrationEmailId === message.id) {
+      skipped++;
+      continue;
+    }
+
+    // Calculate expiry from when the email was received, not when
+    // this processing job happens to run.
+    const expiresAt = new Date(
+      receivedAt.getTime() + 10 * 60 * 60 * 1000
+    );
+
+    // Atomic timestamp comparison prevents an older email from
+    // replacing a newer link, even if processing order changes.
+    const updateResult = await users.updateOne(
+      {
+        _id: matchedUser._id,
+        $or: [
+          { nseRegistrationEmailReceivedAt: { $exists: false } },
+          { nseRegistrationEmailReceivedAt: { $lt: receivedAt } },
+        ],
+      },
       {
         $set: {
           nseRegistrationLink: registrationLink,
           nseRegistrationStatus: "pending",
           nseRegistrationEmailId: message.id,
+          nseRegistrationEmailReceivedAt: receivedAt,
           nseRegistrationLinkUpdatedAt: new Date(),
+          nseRegistrationLinkExpiresAt: expiresAt,
         },
       }
     );
 
-    matched++;
+    if (updateResult.modifiedCount === 1) {
+      matched++;
+    } else {
+      skipped++;
+    }
   }
 
   return {

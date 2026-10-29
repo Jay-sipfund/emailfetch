@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 import { ObjectId } from "mongodb";
-import { getAuth } from "@/lib/auth";import clientPromise from "@/lib/mongodb";
+import { getAuth } from "@/lib/auth"; import clientPromise from "@/lib/mongodb";
 
 export async function GET() {
   try {
@@ -28,6 +28,9 @@ export async function GET() {
         projection: {
           nseRegistrationLink: 1,
           nseRegistrationStatus: 1,
+          nseRegistrationEmailId: 1,
+          nseRegistrationEmailReceivedAt: 1,
+          nseRegistrationLinkExpiresAt: 1,
           ucc: 1,
         },
       }
@@ -44,6 +47,8 @@ export async function GET() {
       ucc: user.ucc ?? null,
       registrationLink: user.nseRegistrationLink ?? null,
       status: user.nseRegistrationStatus ?? "not_started",
+      emailReceivedAt: user.nseRegistrationEmailReceivedAt ?? null,
+      expiresAt: user.nseRegistrationLinkExpiresAt ?? null,
     });
   } catch (error) {
     console.error("Failed to fetch NSE registration details:", error);
