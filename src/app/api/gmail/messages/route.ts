@@ -136,9 +136,11 @@ export async function GET() {
 
                 const body = payload ? getEmailBody(payload) : "";
 
+
                 const uccMatch = body.match(
-                    /Unique Client Code\.?\s*\(UCC\)\s*:\s*([^\r\n]+)/i
+                    /Unique Client Code\s*\(UCC\)\s*:\s*([^\r\n<]+)/i
                 );
+
 
                 const ucc = uccMatch?.[1]?.trim() ?? null;
 
@@ -162,23 +164,23 @@ export async function GET() {
                         }
                     );
                 }
-if (
-    matchedUser &&
-    registrationLink &&
-    /^https?:\/\/\S+\.\S+/.test(registrationLink)
-) {
-    await db.collection("user").updateOne(
-        { _id: matchedUser._id },
-        {
-            $set: {
-                nseRegistrationLink: registrationLink,
-                nseRegistrationStatus: "pending",
-                nseRegistrationEmailId: message.id,
-                nseRegistrationLinkUpdatedAt: new Date(),
-            },
-        }
-    );
-}
+                if (
+                    matchedUser &&
+                    registrationLink &&
+                    /^https?:\/\/\S+\.\S+/.test(registrationLink)
+                ) {
+                    await db.collection("user").updateOne(
+                        { _id: matchedUser._id },
+                        {
+                            $set: {
+                                nseRegistrationLink: registrationLink,
+                                nseRegistrationStatus: "pending",
+                                nseRegistrationEmailId: message.id,
+                                nseRegistrationLinkUpdatedAt: new Date(),
+                            },
+                        }
+                    );
+                }
                 const urls = extractUrls(body);
 
                 return {
