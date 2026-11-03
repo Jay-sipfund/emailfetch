@@ -1,152 +1,145 @@
 
 import { NextResponse } from "next/server";
-import { headers } from "next/headers";
 import { google } from "googleapis";
-import { getAuth } from "@/lib/auth";
 import clientPromise from "@/lib/mongodb";
-import { ObjectId } from "mongodb";
-
 
 export async function GET(request: Request) {
-    const url = new URL(request.url);
-    const code = url.searchParams.get("code");
-    const returnedState = url.searchParams.get("state");
-    const googleError = url.searchParams.get("error");
+  const url = new URL(request.url);
 
-    const response = NextResponse.redirect(
-        new URL("/admin", url.origin)
+  const code = url.searchParams.get("code");
+  const returnedState = url.searchParams.get("state");
+  const googleError = url.searchParams.get("error");
+
+  const callbackUrl = new URL("/verify-email", url.origin);
+
+  const cookieHeader = request.headers.get("cookie") ?? "";
+
+  const cookies = Object.fromEntries(
+    cookieHeader.split(";").filter(Boolean).map((item) => {
+      const index = item.indexOf("=");
+      return [
+        item.slice(0, index).trim(),
+        decodeURIComponent(item.slice(index + 1).trim()),
+      ];
+    })
+  );
+
+  const stateCookie = cookies.customer_gmail_oauth_state;
+  const signupEmail = cookies.customer_gmail_signup_email;
+
+  const response = NextResponse.redirect(callbackUrl);
+
+  response.cookies.set("customer_gmail_oauth_state", "", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/api/customer-gmail/callback",
+    maxAge: 0,
+  });
+
+  response.cookies.set("customer_gmail_signup_email", "", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/api/customer-gmail/callback",
+    maxAge: 0,
+  });
+
+  if (googleError) {
+    callbackUrl.searchParams.set("gmail_error", "permission_denied");
+    return response;
+  }
+
+  if (
+    !code ||
+    !returnedState ||
+    !stateCookie ||
+    returnedState !== stateCookie ||
+    !signupEmail
+  ) {
+    callbackUrl.searchParams.set("gmail_error", "invalid_oauth_state");
+    return response;
+  }
+
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const redirectUri =
+    process.env.GOOGLE_CUSTOMER_GMAIL_REDIRECT_URI;
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    callbackUrl.searchParams.set("gmail_error", "missing_google_config");
+    return response;
+  }
+
+  try {
+    const oauth2Client = new google.auth.OAuth2(
+      clientId,
+      clientSecret,
+      redirectUri
     );
 
-    const cookieHeader = request.headers.get("cookie") ?? "";
-    const stateCookie = cookieHeader
-        .split("; ")
-        .find((item) => item.startsWith("gmail_oauth_state="))
-        ?.split("=")
-        .slice(1)
-        .join("=");
+    const { tokens } = await oauth2Client.getToken(code);
 
-    response.cookies.set("gmail_oauth_state", "", {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "lax",
-        path: "/api/gmail/callback",
-        maxAge: 0,
+    oauth2Client.setCredentials(tokens);
+
+    const gmail = google.gmail({
+      version: "v1",
+      auth: oauth2Client,
     });
 
-    if (googleError) {
-        return NextResponse.redirect(
-            new URL(
-                `/admin?gmail_error=${encodeURIComponent(googleError)}`,
-                url.origin
-            )
-        );
-    }
-
-    if (!code || !returnedState || !stateCookie ||
-        returnedState !== stateCookie) {
-        return NextResponse.redirect(
-            new URL("/admin?gmail_error=invalid_oauth_state", url.origin)
-        );
-    }
-
-    const auth = await getAuth();
-    const session = await auth.api.getSession({
-        headers: await headers(),
+    const profile = await gmail.users.getProfile({
+      userId: "me",
     });
 
-    if (!session) {
-        return NextResponse.redirect(
-            new URL("/login?gmail_error=sign_in_required", url.origin)
-        );
+    const gmailAddress = profile.data.emailAddress?.toLowerCase();
+
+    if (!gmailAddress || gmailAddress !== signupEmail) {
+      callbackUrl.searchParams.set(
+        "gmail_error",
+        "gmail_account_mismatch"
+      );
+      return response;
     }
 
-    let userId: ObjectId;
-
-    try {
-        userId = new ObjectId(session.user.id);
-    } catch {
-        return NextResponse.redirect(
-            new URL("/admin?gmail_error=invalid_user", url.origin)
-        );
+    if (!tokens.refresh_token) {
+      callbackUrl.searchParams.set(
+        "gmail_error",
+        "missing_refresh_token"
+      );
+      return response;
     }
 
     const client = await clientPromise;
     const db = client.db();
 
-    const user = await db.collection("user").findOne(
-        { _id: userId },
-        { projection: { role: 1 } }
+    await db.collection("customerGmailConnections").updateOne(
+      { signupEmail },
+      {
+        $set: {
+          signupEmail,
+          gmailAddress,
+          refreshToken: tokens.refresh_token,
+          scope: tokens.scope,
+          connectedAt: new Date(),
+        },
+      },
+      { upsert: true }
     );
 
-    if (user?.role !== "admin") {
-        return NextResponse.redirect(
-            new URL("/dashboard?gmail_error=admin_required", url.origin)
-        );
-    }
+    callbackUrl.searchParams.set("gmail_connected", "1");
 
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-    const redirectUri = process.env.GOOGLE_REDIRECT_URI;
+    return response;
+  } catch (error) {
+    console.error(
+      "[CUSTOMER GMAIL CALLBACK]",
+      error instanceof Error ? error.message : "Unknown error"
+    );
 
-    if (!clientId || !clientSecret || !redirectUri) {
-        return NextResponse.redirect(
-            new URL("/admin?gmail_error=missing_google_config", url.origin)
-        );
-    }
+    callbackUrl.searchParams.set(
+      "gmail_error",
+      "token_exchange_failed"
+    );
 
-    try {
-        const oauth2Client = new google.auth.OAuth2(
-            clientId,
-            clientSecret,
-            redirectUri
-        );
-
-        const { tokens } = await oauth2Client.getToken(code);
-        oauth2Client.setCredentials(tokens);
-
-        const gmail = google.gmail({
-            version: "v1",
-            auth: oauth2Client,
-        });
-
-        const profile = await gmail.users.getProfile({
-            userId: "me",
-        });
-
-        const gmailAddress = profile.data.emailAddress;
-
-        if (!tokens.refresh_token) {
-            return NextResponse.redirect(
-                new URL("/admin?gmail_error=missing_refresh_token", url.origin)
-            );
-        }
-
-        await db.collection("gmailConnections").updateOne(
-            { purpose: "nse-registration-mailbox" },
-            {
-                $set: {
-                    purpose: "nse-registration-mailbox",
-                    email: gmailAddress,
-                    refreshToken: tokens.refresh_token,
-                    scope: tokens.scope,
-                    connectedBy: session.user.id,
-                    connectedAt: new Date(),
-                },
-            },
-            { upsert: true }
-        );
-
-        return NextResponse.redirect(
-            new URL("/admin?gmail_connected=1", url.origin)
-        );
-    } catch (error) {
-        console.error(
-            "[GMAIL CALLBACK] OAuth exchange failed:",
-            error instanceof Error ? error.message : "Unknown error"
-        );
-
-        return NextResponse.redirect(
-            new URL("/admin?gmail_error=token_exchange_failed", url.origin)
-        );
-    }
+    return response;
+  }
 }

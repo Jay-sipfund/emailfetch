@@ -36,7 +36,9 @@ function decodeHtml(text: string): string {
     .replace(/&#40;/gi, "(")
     .replace(/&#41;/gi, ")")
     .replace(/&#x28;/gi, "(")
-    .replace(/&#x29;/gi, ")");
+    .replace(/&#x29;/gi, ")")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
 }
 
 export async function processNseEmails() {
@@ -99,18 +101,17 @@ export async function processNseEmails() {
     );
 
     console.log("[NSE DEBUG] Email ID:", message.id);
-    console.log("[NSE DEBUG] Body preview:", body.slice(0, 1500));
 
-    // Extract UCC with or without a period after "Code".
+    // Extract UCC from the NSE email.
     const uccMatch = body.match(
-      /Unique Client Code\.?\s*\(UCC\)\s*:\s*([^\r\n<]+)/i
+      /Unique\s+Client\s+Code\s*(?:\(\s*UCC\s*\))?\s*:\s*([A-Za-z0-9_-]+)/i
     );
 
     const ucc = uccMatch?.[1]?.trim() ?? null;
 
-    // Extract a URL with or without its protocol.
+    // Extract the URL following Authorisation Link.
     const linkMatch = body.match(
-      /Authorisation\s+Link\s*:\s*((?:https?:\/\/)?[^\s"'<>]+)/i
+      /Authorisation\s+Link\s*:\s*(https?:\/\/[^\s"'<>]+)/i
     );
 
     let registrationLink = linkMatch?.[1]?.trim() ?? null;
@@ -118,17 +119,11 @@ export async function processNseEmails() {
     if (registrationLink) {
       registrationLink = registrationLink.replace(/[),.;]+$/, "");
 
-      // Add HTTPS when no protocol was provided.
-      if (!/^https?:\/\//i.test(registrationLink)) {
-        registrationLink = `https://${registrationLink}`;
-      }
-
-      // Validate the normalized URL.
       try {
         const parsedUrl = new URL(registrationLink);
 
         if (
-          parsedUrl.protocol !== "https:" ||
+          !["https:", "http:"].includes(parsedUrl.protocol) ||
           !parsedUrl.hostname.includes(".")
         ) {
           registrationLink = null;
@@ -139,7 +134,7 @@ export async function processNseEmails() {
     }
 
     console.log("[NSE DEBUG] Extracted UCC:", ucc);
-    console.log("[NSE DEBUG] Extracted link:", registrationLink);
+    console.log("[NSE DEBUG] Registration link found:", !!registrationLink);
 
     processed++;
 

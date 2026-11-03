@@ -22,6 +22,14 @@ export const getAuth = async () => {
         enabled: true,
       },
 
+      // Google OAuth configuration
+      socialProviders: {
+        google: {
+          clientId: process.env.GOOGLE_CLIENT_ID!,
+          clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+        },
+      },
+
       user: {
         additionalFields: {
           role: {

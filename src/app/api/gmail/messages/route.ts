@@ -6,7 +6,6 @@ import { getAuth } from "@/lib/auth";
 import clientPromise from "@/lib/mongodb";
 import { ObjectId } from "mongodb";
 
-
 function decodeBase64Url(data: string): string {
     return Buffer.from(
         data.replace(/-/g, "+").replace(/_/g, "/"),
@@ -17,7 +16,11 @@ function decodeBase64Url(data: string): string {
 function extractUrls(text: string): string[] {
     const matches = text.match(/https?:\/\/[^\s"'<>]+/g) ?? [];
 
-    return [...new Set(matches.map((url) => url.replace(/[),.;]+$/, "")))];
+    return [
+        ...new Set(
+            matches.map((url) => url.replace(/[),.;]+$/, ""))
+        ),
+    ];
 }
 
 function getEmailBody(payload: {
@@ -38,9 +41,17 @@ function getEmailBody(payload: {
     }
 
     if (payload.parts) {
+        // Prefer plain text when available.
+        for (const part of payload.parts) {
+            if (part.mimeType === "text/plain") {
+                const body = getEmailBody(part);
+                if (body) return body;
+            }
+        }
+
+        // Otherwise try nested parts, including HTML.
         for (const part of payload.parts) {
             const body = getEmailBody(part);
-
             if (body) return body;
         }
     }
@@ -51,9 +62,28 @@ function getEmailBody(payload: {
 
     return "";
 }
+
+function normalizeEmailBody(body: string): string {
+    return body
+        .replace(/<[^>]*>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&#46;|&period;/gi, ".")
+        .replace(/&#58;|&colon;/gi, ":")
+        .replace(/&#40;/gi, "(")
+        .replace(/&#41;/gi, ")")
+        .replace(/&#x28;/gi, "(")
+        .replace(/&#x29;/gi, ")")
+        .replace(/&#x2e;/gi, ".")
+        .replace(/&#x3a;/gi, ":")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
 export async function GET() {
     try {
         const auth = await getAuth();
+
         const session = await auth.api.getSession({
             headers: await headers(),
         });
@@ -67,6 +97,13 @@ export async function GET() {
 
         const client = await clientPromise;
         const db = client.db();
+
+        if (!ObjectId.isValid(session.user.id)) {
+            return NextResponse.json(
+                { error: "Invalid user session." },
+                { status: 401 }
+            );
+        }
 
         const user = await db.collection("user").findOne(
             { _id: new ObjectId(session.user.id) },
@@ -83,7 +120,9 @@ export async function GET() {
         const connection = await db
             .collection("gmailConnections")
             .findOne({ purpose: "nse-registration-mailbox" });
+
         console.log("[GMAIL CONNECTION EMAIL]", connection?.email);
+
         if (!connection?.refreshToken) {
             return NextResponse.json(
                 { error: "Gmail is not connected." },
@@ -125,34 +164,52 @@ export async function GET() {
                     metadataHeaders: ["Subject", "From", "Date"],
                 });
 
-                const headers = detail.data.payload?.headers ?? [];
+                const emailHeaders =
+                    detail.data.payload?.headers ?? [];
 
                 const getHeader = (name: string) =>
-                    headers.find(
+                    emailHeaders.find(
                         (header) =>
                             header.name?.toLowerCase() === name.toLowerCase()
                     )?.value ?? "";
+
                 const payload = detail.data.payload;
-
                 const body = payload ? getEmailBody(payload) : "";
+                const normalizedBody = normalizeEmailBody(body);
 
-
-                const uccMatch = body.match(
-                    /Unique Client Code\s*\(UCC\)\s*:\s*([^\r\n<]+)/i
+                // Extract UCC from the NSE email.
+                // Example: Unique Client Code. (UCC) : lav123
+                const uccMatch = normalizedBody.match(
+                    /Unique\s+Client\s+Code\s*\.?\s*\(\s*UCC\s*\)\s*:\s*([A-Za-z0-9_-]+)/i
                 );
-
 
                 const ucc = uccMatch?.[1]?.trim() ?? null;
 
-                const authorisationMatch = body.match(
-                    /Authorisation Link\s*:\s*(https?:\/\/[^\s]+)/i
+                // Extract the authorisation URL.
+                const authorisationMatch = normalizedBody.match(
+                    /Authorisation\s+Link\s*:\s*(https?:\/\/[^\s"'<>]+)/i
                 );
 
-                const registrationLink = authorisationMatch?.[1]?.trim() ?? null;
-                let matchedUser = null;
+                const registrationLink =
+                    authorisationMatch?.[1]?.replace(/[),.;]+$/, "") ?? null;
+
+                console.log("[NSE DEBUG] Email ID:", message.id);
+                console.log("[NSE DEBUG] Extracted UCC:", ucc);
+                console.log("[NSE DEBUG] Registration link:", registrationLink);
+
+                // Find the SIPFUND customer using the extracted UCC.
+
+                type MatchedUser = {
+                    _id: ObjectId;
+                    name?: string;
+                    email?: string;
+                    ucc?: string;
+                };
+
+                let matchedUser: MatchedUser | null = null;
 
                 if (ucc) {
-                    matchedUser = await db.collection("user").findOne(
+                    matchedUser = await db.collection<MatchedUser>("user").findOne(
                         { ucc },
                         {
                             projection: {
@@ -164,24 +221,50 @@ export async function GET() {
                         }
                     );
                 }
-                if (
-                    matchedUser &&
-                    registrationLink &&
-                    /^https?:\/\/\S+\.\S+/.test(registrationLink)
-                ) {
-                    await db.collection("user").updateOne(
-                        { _id: matchedUser._id },
-                        {
-                            $set: {
-                                nseRegistrationLink: registrationLink,
-                                nseRegistrationStatus: "pending",
-                                nseRegistrationEmailId: message.id,
-                                nseRegistrationLinkUpdatedAt: new Date(),
-                            },
+
+
+                // Save the NSE registration link to the matched customer.
+                let updateResult = null;
+
+                if (matchedUser && registrationLink) {
+                    try {
+                        const parsedUrl = new URL(registrationLink);
+
+                        if (
+                            parsedUrl.protocol === "https:" ||
+                            parsedUrl.protocol === "http:"
+                        ) {
+                            updateResult = await db.collection("user").updateOne(
+                                { _id: matchedUser._id },
+                                {
+                                    $set: {
+                                        nseRegistrationLink: registrationLink,
+                                        nseRegistrationStatus: "pending",
+                                        nseRegistrationEmailId: message.id,
+                                        nseRegistrationLinkUpdatedAt: new Date(),
+                                    },
+                                }
+                            );
                         }
-                    );
+                    } catch {
+                        console.log(
+                            "[NSE DEBUG] Invalid authorisation URL:",
+                            registrationLink
+                        );
+                    }
                 }
-                const urls = extractUrls(body);
+
+                console.log(
+                    "[NSE DEBUG] Customer matched:",
+                    !!matchedUser
+                );
+
+                console.log(
+                    "[NSE DEBUG] MongoDB modified:",
+                    updateResult?.modifiedCount ?? 0
+                );
+
+                const urls = extractUrls(normalizedBody);
 
                 return {
                     id: message.id,
@@ -199,24 +282,22 @@ export async function GET() {
                             ucc: matchedUser.ucc,
                         }
                         : null,
+                    databaseUpdated:
+                        (updateResult?.matchedCount ?? 0) > 0,
                 };
-
             })
         );
 
         return NextResponse.json({
-            email: connection.email,
-            count: emails.filter(Boolean).length,
-            messages: emails.filter(Boolean),
+            success: true,
+            totalEmails: emails.filter(Boolean).length,
+            emails: emails.filter(Boolean),
         });
     } catch (error) {
-        console.error(
-            "[GMAIL MESSAGES] Failed:",
-            error instanceof Error ? error.message : "Unknown error"
-        );
+        console.error("[GMAIL API ERROR]", error);
 
         return NextResponse.json(
-            { error: "Unable to fetch Gmail messages." },
+            { error: "Failed to fetch or process Gmail messages." },
             { status: 500 }
         );
     }
